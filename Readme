@@ -1,0 +1,98 @@
+# LpMeasurements
+
+MATLAB scripts for measuring the **persistence length (Lp)** of dynamic microtubules (MTs) from fluorescence/darkfield microscopy movies, plus tools to generate matching simulated data for validation.
+
+The pipeline extracts a microtubule's backbone shape frame-by-frame from a movie, computes the amplitude of thermally driven bending fluctuations as a function of contour length, and fits that to extract the persistence length via the classic worm-like-chain relationship between mean-squared transverse displacement and bending stiffness.
+
+## How it works (pipeline overview)
+
+1. **`fit_backbone.m`** — Loads a TIFF movie, lets you define a reference line along the microtubule, and fits a moving Gaussian profile across the contour at each position/frame to track the backbone's perpendicular displacement (`Yp`) and intensity (`Ip`) over time.
+2. **`analyze_backbones.m`** — Takes the `result` structure from step 1, computes the autocorrelation (mean-squared displacement) of transverse fluctuations at each position along the tube, estimates and subtracts measurement noise, and fits the noise-corrected fluctuation amplitude vs. contour length to extract **Lp** (with confidence bounds).
+3. **`length_amp_dynamics_corr_3pt.m`** — Helper called by `analyze_backbones.m`; computes the position-resolved autocorrelation/MSD and identifies the fluctuation "plateau" value at each contour position.
+4. **`SIM_dynamic_MT.m`** + **`generate_growing_tubule.m`** + **`Wmode.m`** — Generate synthetic movies of growing, fluctuating microtubules with known bending modulus (kappa), for testing the analysis pipeline against ground truth.
+5. **TIFF I/O helpers** — `Fast_Tiff_Write.m`, `Fast_BigTiff_Write.m`, `TIFFStack.m`, `tiffread31_header.m`, `tiffread31_readtags.m` handle fast writing and memory-mapped reading of (Big)TIFF movie files.
+6. **Benchmark/test scripts** — `test_fTiff.m`, `test_bTiff.m`, `Time_Tiff.m` are standalone scripts for testing/benchmarking the TIFF writers; not part of the core analysis pipeline.
+
+## Requirements
+
+- MATLAB (developed/tested with a relatively recent release; uses `imgaussfilt`, `fit`, function handles, classdef, etc.)
+- **Curve Fitting Toolbox** — required by `analyze_backbones.m` (`fit(...,'poly1')`) and by `fit_backbone.m`'s workflow. The script will attempt to auto-checkout a license and wait/retry if one isn't immediately available.
+- Image Processing Toolbox (for `imgaussfilt`, `imagesc`, etc.)
+- No external/third-party toolboxes beyond MATLAB + these two.
+
+## Step-by-step usage
+
+### 1. Track a backbone from a real movie
+
+```matlab
+fit_params.cr_start = [58, 324];   % [col, row] point just before the fixed end
+fit_params.cr_end   = [43, 26];    % [col, row] point just beyond the free end
+% (optional) fit_params.contour_width, .psf_width, .pixel_size,
+%            .contour_extra_length, .Nframe_avg_growth — see defaults in-script
+
+result = fit_backbone(fname, fit_params);
+```
+
+- You'll be prompted with a file picker (`uigetfile`) to select the `.tif`/`.tiff` movie — the `fname` argument is effectively overridden by this dialog in the current code.
+- Read `cr_start`/`cr_end` pixel coordinates directly off the movie in ImageJ.
+- Three figures are produced during/after the fit:
+  - **Figure 1** — the movie with the fitted contour overlaid (live during fitting).
+  - **Figure 2** — kymograph of intensity and displacement with detected tube ends marked (diagnostic only; not used downstream).
+  - **Figure 3** — mean displacement, RMS displacement, and extremes vs. contour position. This is the key sanity-check plot.
+- Save the workspace (in particular the `result` struct) once you're happy with the fit, e.g. as `backbone.mat`.
+
+### 2. Extract persistence length from the tracked backbone
+
+```matlab
+[acorr, meansigsqr, plateau_value, plateau_data, sigmasquared, numSample, ...
+ meandY3point, noise_estimate_3point, noise_corr3point, noise_corr_abs3point, ...
+ sigma_3_twoThirds3pt, f, gof, slope, yintercept, Xintercept_seed_positions, ...
+ Lp, Lplower, Lpupper, dYsqr_3point] = analyze_backbones(result);
+```
+
+- A figure will pop up showing the fit of `sigma^(2/3)` vs. contour position — this should be linear; the slope determines Lp.
+- `Lp`, `Lplower`, `Lpupper` (95% CI) are your key outputs, given in meters (uses a hardcoded pixel size of 108 nm — see Known Limitations).
+- Repeat for each tracked backbone; the paper's suggested workflow is to collect the resulting `Lp` values across tubes for downstream statistics/plotting (e.g. in Prism).
+
+### 3. Generate simulated data (optional, for validation)
+
+```matlab
+SIM_dynamic_MT
+```
+
+- Edit in-script parameters before running:
+  - `Lmin`/`Lmax` — min/max simulated tube length (script lines ~30–31 in the original).
+  - `kappas`, and the `for runNum=...` / `for k=...` loop bounds — number of runs and bending-modulus values to simulate.
+  - `ParentDataFolder` — output directory (**must be changed** from the hardcoded path in the script before running).
+  - Background mean/std levels for different simulated noise conditions.
+- Output: multi-frame TIFF movies (written via `Fast_Tiff_Write`) in subfolders per background condition, suitable as input to `fit_backbone.m` for pipeline validation against known ground-truth Lp.
+
+## File reference
+
+| File | Purpose |
+|---|---|
+| `fit_backbone.m` | Track MT backbone position/intensity per frame from a movie |
+| `analyze_backbones.m` | Compute Lp (and CI) from tracked backbone data |
+| `length_amp_dynamics_corr_3pt.m` | Autocorrelation/MSD helper used by `analyze_backbones.m` |
+| `SIM_dynamic_MT.m` | Generate simulated dynamic MT movies |
+| `generate_growing_tubule.m` | Generate synthetic backbone trajectories (physics model) |
+| `Wmode.m` | Normal-mode basis functions used by the simulator |
+| `Fast_Tiff_Write.m` | Fast standard TIFF writer |
+| `Fast_BigTiff_Write.m` | Fast BigTIFF writer (for very large files) |
+| `TIFFStack.m` | Memory-mapped, tensor-like access to TIFF stacks for reading |
+| `tiffread31_header.m` | TIFF/BigTIFF header parser |
+| `tiffread31_readtags.m` | TIFF per-frame tag reader |
+| `test_fTiff.m`, `test_bTiff.m`, `Time_Tiff.m` | Standalone tests/benchmarks for the TIFF writers (not part of the Lp pipeline) |
+
+## Known limitations / things to be aware of
+
+- **Hardcoded pixel size**: `analyze_backbones.m` uses a hardcoded `108e-9` m pixel size when converting the fit slope to Lp, independent of `fit_params.pixel_size` used in `fit_backbone.m`. If your acquisition pixel size differs, update this value directly in `analyze_backbones.m`.
+- **Hardcoded/interactive file paths**: `SIM_dynamic_MT.m` contains an absolute output path (`ParentDataFolder`) that must be edited before running. `fit_backbone.m` uses `uigetfile` for interactive file selection rather than accepting the `fname` argument directly.
+- **Fixed frame-window assumptions**: `analyze_backbones.m` assumes tube lengths/frame counts consistent with the original acquisition setup (e.g. a 120-pixel "pixel of existence" ≈ 12 µm, a 240-pixel/24 µm cutoff, and `ncomp = 400` frames for autocorrelation). These constants may need adjusting for datasets with different pixel size, frame rate, or tube length range.
+- **No bounds/empty-data checks**: Several loops that search for valid start/end tracking windows (in `analyze_backbones.m`) can run past array bounds if a tube never reaches the expected length or has too many gaps; this will raise a MATLAB indexing error rather than a descriptive one.
+- **Requires Curve Fitting Toolbox**: without it, `analyze_backbones.m` will block waiting for a license checkout (it polls in a loop moving the mouse to prevent sleep) rather than failing immediately.
+- This is research/analysis code originally written to support a specific experimental workflow, not a general-purpose packaged tool — expect to need to adapt some hardcoded constants for a different microscope, magnification, or frame rate.
+
+## Citation / provenance
+
+The TIFF read/write utilities (`Fast_Tiff_Write.m`, `Fast_BigTiff_Write.m`, `TIFFStack.m`) are third-party components (by R. Harkes, O. Hernandez, and D. R. Muir/B. M. Kampa respectively) bundled here as dependencies — see in-file headers for license (GPL) and citation details. If you use `TIFFStack`, consider citing: Muir & Kampa, 2015, *Frontiers in Neuroinformatics* 8:85.
